@@ -205,12 +205,13 @@ TEST_F(DockerContainerizerTest, DOCKER_Usage)
   ASSERT_SOME(master);
 
   slave::Flags flags = CreateSlaveFlags();
+  flags.resources = Option<string>("cpus:2;mem:1024");
 
   Docker docker(tests::flags.docker);
 
   MockDockerContainerizer dockerContainerizer(flags, true, docker);
 
-  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer);
+  Try<PID<Slave> > slave = StartSlave(&dockerContainerizer, flags);
   ASSERT_SOME(slave);
 
   MockScheduler sched;
@@ -244,7 +245,9 @@ TEST_F(DockerContainerizerTest, DOCKER_Usage)
   CommandInfo command;
   CommandInfo::ContainerInfo* containerInfo = command.mutable_container();
   containerInfo->set_image("docker://busybox");
-  command.set_value("sleep 120");
+
+  // Run a CPU intensive command, so we can measure utime and stime later.
+  command.set_value("dd if=/dev/zero of=/dev/null");
 
   task.mutable_command()->CopyFrom(command);
 
@@ -270,10 +273,23 @@ TEST_F(DockerContainerizerTest, DOCKER_Usage)
   AWAIT_READY_FOR(statusRunning, Seconds(60));
   EXPECT_EQ(TASK_RUNNING, statusRunning.get().state());
 
+  // Wait for a while, so the container will consume some utime and stime.
+  os::sleep(Seconds(1));
   Future<ResourceStatistics> usage =
     dockerContainerizer.usage(containerId.get());
   AWAIT_READY(usage);
-  // TODO(yifan): Verify the usage.
+
+  // Verify the usage.
+  EXPECT_EQ(2, usage.get().cpus_limit());
+  EXPECT_EQ(1024*1024*1024, usage.get().mem_limit_bytes());
+  EXPECT_TRUE(usage.get().cpus_user_time_secs() > 0);
+  EXPECT_TRUE(usage.get().cpus_system_time_secs() > 0);
+
+  VLOG(2) << "utime:" << usage.get().cpus_user_time_secs();
+  VLOG(2) << "stime:" << usage.get().cpus_system_time_secs();
+
+  Future<containerizer::Termination> termination =
+    dockerContainerizer.wait(containerId.get());
 
   dockerContainerizer.destroy(containerId.get());
 
